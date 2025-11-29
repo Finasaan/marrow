@@ -1,0 +1,259 @@
+name: Deploy to Cloudflare
+
+# Version Configuration
+env:
+  MAJOR_VERSION: "0"
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  packages: write
+  contents: write
+
+jobs:
+  buildAndTest:
+    name: Build and Test Marrow
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install dependencies
+        run: npm install
+
+  buildAndDeployPreview:
+    name: Preview Build and Deploy Marrow
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    outputs:
+      deployment-url: ${{ steps.deployPreview.outputs.deployment-url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Deploy to cloudflare
+        id: deployPreview
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: deploy --env preview
+
+  CreatePreviewRelease:
+    name: Create Preview Release
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    needs: buildAndDeployPreview
+    steps:
+      - name: Checkout code for release creation
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release version
+        id: generate_version
+        run: |
+          # Determine environment prefix
+          PREFIX="preview-v${{ env.MAJOR_VERSION }}."
+
+          # Get latest release with this prefix using GitHub API
+          LATEST_RELEASE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases" | \
+            jq -r --arg prefix "$PREFIX" '[.[] | select(.tag_name | startswith($prefix)) | .tag_name] | sort | last // empty')
+
+          if [[ -z "$LATEST_RELEASE" || "$LATEST_RELEASE" == "null" ]]; then
+            # No previous releases found, start with .1
+            MINOR_VERSION="1"
+          else
+            # Extract minor version and increment
+            CURRENT_MINOR=$(echo "$LATEST_RELEASE" | sed "s/${PREFIX}//")
+            MINOR_VERSION=$((CURRENT_MINOR + 1))
+          fi
+
+          # Create new version
+          NEW_VERSION="${PREFIX}${MINOR_VERSION}"
+
+          echo "version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "date=$(date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+
+          echo "🏷️ Generated version: ${NEW_VERSION}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          name: "${{ steps.generate_version.outputs.version }}"
+          tag_name: ${{ steps.generate_version.outputs.version }}
+          body: |
+            ### Preview Environment Deployment
+            **Deployed at:** ${{ steps.generate_version.outputs.date }}
+            **Branch:** ${{ github.ref_name }}
+            **Commit:** ${{ github.sha }}
+            **Deployment URL:** ${{ needs.buildAndDeployPreview.outputs.deployment-url }}
+
+            This is an automated preview release deployed to the preview environment.
+          draft: false
+          prerelease: false
+          make_latest: false
+
+  buildAndDeployProduction:
+    name: Prod Build and Deploy Marrow
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    outputs:
+      deployment-url: ${{ steps.deployProduction.outputs.deployment-url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Deploy to cloudflare
+        id: deployProduction
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: deploy
+
+  CreateProductionRelease:
+    name: Create Production Release
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    needs: buildAndDeployProduction
+    steps:
+      - name: Checkout code for release creation
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release version
+        id: generate_version
+        run: |
+          # Determine environment prefix
+          PREFIX="prod-v${{ env.MAJOR_VERSION }}."
+
+          # Get latest release with this prefix using GitHub API
+          LATEST_RELEASE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases" | \
+            jq -r --arg prefix "$PREFIX" '[.[] | select(.tag_name | startswith($prefix)) | .tag_name] | sort | last // empty')
+
+          if [[ -z "$LATEST_RELEASE" || "$LATEST_RELEASE" == "null" ]]; then
+            # No previous releases found, start with .1
+            MINOR_VERSION="1"
+          else
+            # Extract minor version and increment
+            CURRENT_MINOR=$(echo "$LATEST_RELEASE" | sed "s/${PREFIX}//")
+            MINOR_VERSION=$((CURRENT_MINOR + 1))
+          fi
+
+          # Create new version
+          NEW_VERSION="${PREFIX}${MINOR_VERSION}"
+
+          echo "version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "date=$(date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+
+          echo "🏷️ Generated version: ${NEW_VERSION}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          name: "${{ steps.generate_version.outputs.version }}"
+          tag_name: ${{ steps.generate_version.outputs.version }}
+          body: |
+            ### Production Environment Deployment
+            **Deployed at:** ${{ steps.generate_version.outputs.date }}
+            **Branch:** ${{ github.ref_name }}
+            **Commit:** ${{ github.sha }}
+            **Deployment URL:** ${{ needs.buildAndDeployProduction.outputs.deployment-url }}
+
+            This is an automated release deployed to the production environment.
+          draft: false
+          prerelease: false
+          make_latest: true
+
+  JobSummary:
+    name: Job Summary
+    runs-on: ubuntu-latest
+    if: always() && (needs.CreatePreviewRelease.result == 'success' || needs.CreateProductionRelease.result == 'success')
+    needs:
+      - buildAndDeployPreview
+      - CreatePreviewRelease
+      - buildAndDeployProduction
+      - CreateProductionRelease
+    steps:
+      - name: Calculate total workflow time and create summary
+        run: |
+          # Get workflow start time
+          WORKFLOW_START=$(date -d "${{ github.event.head_commit.timestamp || github.event.repository.pushed_at }}" +%s)
+          CURRENT_TIME=$(date +%s)
+          TOTAL_TIME=$((CURRENT_TIME - WORKFLOW_START))
+
+          # Convert to minutes and seconds
+          MINUTES=$((TOTAL_TIME / 60))
+          SECONDS=$((TOTAL_TIME % 60))
+
+          # Determine deployment URL and environment
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            DEPLOYMENT_URL="${{ needs.buildAndDeployPreview.outputs.deployment-url }}"
+            ENVIRONMENT="Preview"
+            RELEASE_TYPE="Preview"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            DEPLOYMENT_URL="${{ needs.buildAndDeployProduction.outputs.deployment-url }}"
+            ENVIRONMENT="Production"
+            RELEASE_TYPE="Production"
+          fi
+
+          # Create job summary
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # 🚀 Deployment Summary
+
+          ## ✅ Deployment Successful
+
+          | Field | Value |
+          |-------|-------|
+          | **Environment** | $ENVIRONMENT |
+          | **Branch** | \`${{ github.ref_name }}\` |
+          | **Commit** | \`${{ github.sha }}\` |
+          | **Total Time** | ${MINUTES}m ${SECONDS}s |
+          | **Triggered By** | ${{ github.actor }} |
+          | **Trigger Event** | ${{ github.event_name }} |
+
+          ## 🌐 Deployment Details
+
+          **$RELEASE_TYPE URL:** $DEPLOYMENT_URL
+
+          **Commit Message:** ${{ github.event.head_commit.message }}
+
+          ---
+
+          > 🎉 Your Finasaan application has been successfully deployed to the $ENVIRONMENT environment!
+          EOF

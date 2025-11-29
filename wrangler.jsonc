@@ -1,0 +1,51 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "marrow",
+  "account_id": "345590cd19a379d6bf1008c6a7860451",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-06-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./public"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "placement": { "mode": "smart" },
+  "keep_vars": false,
+  "routes": ["finasaan.com/admin/api/*", "www.finasaan.com/admin/api/*"],
+
+  // Supabase environment variables (cloud-based)
+  // These will be overridden by secrets in production
+  // Use `wrangler secret put SUPABASE_URL` and `wrangler secret put SUPABASE_KEY` to set production secrets
+  "vars": {
+    "SUPABASE_URL": "https://your-project-ref.supabase.co",
+    "SUPABASE_KEY": "your-anon-key"
+  },
+
+  // preview environment
+  "env": {
+    "preview": {
+      "name": "marrow-preview",
+      "routes": [
+        "finasaan.com/admin/api/preview/*",
+        "www.finasaan.com/admin/api/preview/*"
+      ],
+      "vars": {
+        "SUPABASE_URL": "https://your-preview-project-ref.supabase.co",
+        "SUPABASE_KEY": "your-preview-anon-key"
+      }
+    }
+  },
+
+  // dev configuration
+  "dev": {
+    "port": 8788,
+    "local_protocol": "http"
+  }
+}
