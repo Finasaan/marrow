@@ -15,4 +15,6 @@ psxRouter.get("/companies/symbol/:symbol", psxController.getCompanyBySymbol);
 // Stock data endpoints
 psxRouter.get("/companies/:companyId/stock-data", psxController.getStockData);
 
+psxRouter.post("/companies/update/symbol", psxController.updateSymbols);
+
 export { psxRouter };

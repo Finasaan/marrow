@@ -119,4 +119,80 @@ export const psxController = {
       return c.json(errorResponse(err), 500);
     }
   },
+
+  updateSymbols: async (c: AppContext) => {
+    try {
+      const response = await fetch("https://dps.psx.com.pk/symbols");
+      if (!response.ok) {
+        return c.json(
+          { success: false, error: "Failed to fetch symbols from PSX" },
+          500
+        );
+      }
+      const symbolsData: any = await response.json();
+      const supabase = await getSupabaseClient(c.env);
+
+      const uniqueSectorNames = Array.from(
+        new Set(
+          symbolsData
+            .map((symbolEntry: any) =>
+              symbolEntry.sectorName
+                ? String(symbolEntry.sectorName).trim()
+                : null
+            )
+            .filter((name: string | null) => name !== null)
+        )
+      ) as string[];
+
+      const sectorsToUpsert = uniqueSectorNames.map((name: string) => {
+        return { name: name };
+      });
+
+      const { data: sectorsResult, error: sectorsError } = await supabase
+        .from("sectors")
+        .upsert(sectorsToUpsert, { onConflict: "name" })
+        .select();
+
+      if (sectorsError) {
+        return c.json({ success: false, error: sectorsError.message }, 500);
+      }
+
+      const sectorMap = new Map<string, string>();
+      if (sectorsResult) {
+        sectorsResult.forEach((sector: any) => {
+          if (sector.name && sector.id) {
+            sectorMap.set(sector.name, sector.id);
+          }
+        });
+      }
+
+      const companiesToUpsert = symbolsData.map((symbolEntry: any) => {
+        const sectorName = symbolEntry.sectorName
+          ? String(symbolEntry.sectorName).trim()
+          : null;
+        return {
+          symbol: symbolEntry.symbol.toUpperCase(),
+          company_name: symbolEntry.name,
+          sector_id: sectorName ? sectorMap.get(sectorName) || null : null,
+        };
+      });
+
+      const { data: companiesResult, error: companiesError } = await supabase
+        .from("companies")
+        .upsert(companiesToUpsert, { onConflict: "symbol" })
+        .select();
+
+      if (companiesError) {
+        return c.json({ success: false, error: companiesError.message }, 500);
+      }
+
+      return c.json({
+        success: true,
+        data: companiesResult,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err) {
+      return c.json(errorResponse(err), 500);
+    }
+  },
 };
