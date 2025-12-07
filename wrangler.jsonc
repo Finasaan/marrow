@@ -4,7 +4,7 @@
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "marrow",
+  "name": "spine",
   "account_id": "345590cd19a379d6bf1008c6a7860451",
   "main": "src/index.ts",
   "compatibility_date": "2025-06-18",
@@ -23,23 +23,42 @@
   // Supabase environment variables (cloud-based)
   // These will be overridden by secrets in production
   // Use `wrangler secret put SUPABASE_URL` and `wrangler secret put SUPABASE_KEY` to set production secrets
-  "vars": {
-    "SUPABASE_URL": "https://your-project-ref.supabase.co",
-    "SUPABASE_KEY": "your-anon-key"
-  },
+  "secrets_store_secrets": [
+    {
+      "binding": "SUPABASE_URL_PRODUCTION",
+      "store_id": "78b3cb561b5149d89eb3a1ef2a126438",
+      "secret_name": "SUPABASE_URL_PRODUCTION"
+    },
+    {
+      "binding": "SUPABASE_ANON_KEY_PRODUCTION",
+      "store_id": "78b3cb561b5149d89eb3a1ef2a126438",
+      "secret_name": "SUPABASE_ANON_KEY_PRODUCTION"
+    }
+  ],
 
   // preview environment
   "env": {
     "preview": {
-      "name": "marrow-preview",
+      "name": "spine-preview",
       "routes": [
         "finasaan.com/admin/api/preview/*",
         "www.finasaan.com/admin/api/preview/*"
       ],
       "vars": {
-        "SUPABASE_URL": "https://your-preview-project-ref.supabase.co",
-        "SUPABASE_KEY": "your-preview-anon-key"
-      }
+        "environment": "preview"
+      },
+      "secrets_store_secrets": [
+        {
+          "binding": "SUPABASE_URL_PREVIEW",
+          "store_id": "78b3cb561b5149d89eb3a1ef2a126438",
+          "secret_name": "SUPABASE_URL_PREVIEW"
+        },
+        {
+          "binding": "SUPABASE_ANON_KEY_PREVIEW",
+          "store_id": "78b3cb561b5149d89eb3a1ef2a126438",
+          "secret_name": "SUPABASE_ANON_KEY_PREVIEW"
+        }
+      ]
     }
   },
 

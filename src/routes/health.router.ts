@@ -9,7 +9,7 @@ const healthRouter = new Hono<{ Bindings: CloudflareBindings }>();
 
 // Health and utility endpoints
 healthRouter.get("/health", healthController.healthCheck);
-healthRouter.get("/db-test", healthController.dbTest);
 healthRouter.get("/message", healthController.message);
+healthRouter.get("/financial-tips", healthController.financialTips);
 
 export { healthRouter };
