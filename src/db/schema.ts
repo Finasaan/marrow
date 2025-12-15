@@ -48,12 +48,18 @@ export interface Company {
 
 export interface MutualFund {
   id: number;
-  symbol: string;
+  symbol: string | null;
   name: string | null;
+  external_id: string | null;
+  risk_profile: string | null;
+  aum: number | null;
+  is_shariah_compliant: boolean;
   provider_id: number | null;
   sector_id: number | null;
   description: string | null;
   inception_date: string | null; // DATE as ISO string
+  onemonthperc: number | null;
+  ytd: number | null;
   fund_strategy_embedding: number[] | null; // pgvector
 }
 
