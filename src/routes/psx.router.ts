@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { psxController } from "../controllers";
+import { psxIngestionController } from "../controllers/psx-ingestion.controller";
 
 /**
  * PSX Router - Pakistan Stock Exchange routes
@@ -16,5 +17,9 @@ psxRouter.get("/companies/symbol/:symbol", psxController.getCompanyBySymbol);
 psxRouter.get("/companies/:companyId/stock-data", psxController.getStockData);
 
 psxRouter.post("/companies/update/symbol", psxController.updateSymbols);
+
+// Daily stock ingestion endpoints
+psxRouter.post("/ingest/daily", psxIngestionController.runDailyIngestion);
+psxRouter.post("/ingest/backfill", psxIngestionController.runForDate);
 
 export { psxRouter };
