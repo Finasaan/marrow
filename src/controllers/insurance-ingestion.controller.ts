@@ -1,9 +1,10 @@
 /**
  * Insurance Ingestion Controller
  * Orchestrates the insurance PDF ingestion pipeline:
- * 1. Fetch & preprocess PDFs (marrow)
- * 2. Check Supabase for duplicate hashes (marrow)
- * 3. Send chunks to spine for embedding + storage (spine is AI gatekeeper)
+ * 1. Fetch & preprocess PDFs
+ * 2. Check Supabase for duplicate hashes
+ * 3. Generate embeddings via Workers AI (own AI binding — no spine dependency)
+ * 4. Store documents + chunks directly in Supabase
  */
 
 import { getSupabaseClient } from "../db";
@@ -11,6 +12,9 @@ import { AppContext, errorResponse } from "../types";
 import {
   processInsurancePDF,
   INSURANCE_PDF_URLS,
+  generateEmbeddings,
+  storeInsuranceDocument,
+  storeInsuranceChunks,
 } from "../services/insurance-ingestion.service";
 
 // ============================================================================
@@ -20,67 +24,9 @@ import {
 const INGESTION_CONFIG = {
   /** Number of concurrent PDF downloads */
   CONCURRENCY: 3,
+  /** Embedding batch size (Workers AI limit) */
+  EMBED_BATCH_SIZE: 20,
 };
-
-/**
- * Get spine URL from environment.
- * Requires SPINE_URL to be set in wrangler.jsonc vars or .dev.vars.
- * Throws if missing — fail-fast is better than silently calling localhost in prod.
- */
-function getSpineUrl(env: Record<string, unknown>): string {
-  const url = env.SPINE_URL as string | undefined;
-  if (!url) {
-    throw new Error(
-      "SPINE_URL is not configured. Set it in wrangler.jsonc vars (prod/preview) or .dev.vars (local dev)."
-    );
-  }
-  return url;
-}
-
-/**
- * Send preprocessed document + chunks to spine for embedding and storage
- */
-async function sendToSpineForEmbedding(
-  spineUrl: string,
-  document: {
-    company_id: string;
-    company_name: string;
-    policy_name: string;
-    doc_type: string;
-    source_url: string;
-    raw_text: string;
-    cleaned_text: string;
-    document_hash: string;
-  },
-  chunks: Array<{
-    chunk_index: number;
-    chunk_type: "body" | "table";
-    text: string;
-    char_start: number;
-    char_end: number;
-    metadata: Record<string, unknown>;
-  }>
-): Promise<{ success: boolean; chunks_stored?: number; error?: string }> {
-  const response = await fetch(`${spineUrl}/api/insurance/ingest`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ document, chunks }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    return {
-      success: false,
-      error: `Spine returned ${response.status}: ${errorText}`,
-    };
-  }
-
-  return (await response.json()) as {
-    success: boolean;
-    chunks_stored?: number;
-    error?: string;
-  };
-}
 
 /**
  * Check if a document hash already exists in insurance_documents
@@ -151,11 +97,12 @@ export const insuranceIngestionController = {
    * Processes all 24 PDF URLs:
    * 1. Fetch + preprocess each PDF
    * 2. Check hash deduplication against Supabase
-   * 3. Send new documents to spine for embedding + storage
+   * 3. Generate embeddings via Workers AI (local)
+   * 4. Store documents + chunks in Supabase
    */
   runFullIngestion: async (c: AppContext) => {
     const startTime = Date.now();
-    const spineUrl = getSpineUrl(c.env as unknown as Record<string, unknown>);
+    const ai = c.env.AI;
 
     const stats = {
       totalPDFs: INSURANCE_PDF_URLS.length,
@@ -172,7 +119,6 @@ export const insuranceIngestionController = {
       console.log(
         `[Insurance] Starting ingestion of ${INSURANCE_PDF_URLS.length} PDFs`
       );
-      console.log(`[Insurance] Spine URL: ${spineUrl}`);
 
       const { results, errors } = await processBatched(
         INSURANCE_PDF_URLS,
@@ -191,25 +137,33 @@ export const insuranceIngestionController = {
             return { url, skipped: true, chunks: 0 };
           }
 
-          // 3. Send to spine for embedding + storage
-          const result = await sendToSpineForEmbedding(
-            spineUrl,
-            document,
-            chunks
-          );
-
-          if (!result.success) {
-            throw new Error(result.error || "Spine ingestion failed");
+          // 3. Generate embeddings locally via Workers AI
+          const texts = chunks.map((ch) => ch.text);
+          const allEmbeddings: number[][] = [];
+          for (
+            let i = 0;
+            i < texts.length;
+            i += INGESTION_CONFIG.EMBED_BATCH_SIZE
+          ) {
+            const batch = texts.slice(i, i + INGESTION_CONFIG.EMBED_BATCH_SIZE);
+            const batchEmbeddings = await generateEmbeddings(ai, batch);
+            allEmbeddings.push(...batchEmbeddings);
           }
 
-          console.log(
-            `[Insurance] Ingested ${result.chunks_stored} chunks from ${url}`
+          // 4. Store document + chunks in Supabase
+          const documentId = await storeInsuranceDocument(supabase, document);
+          const chunksStored = await storeInsuranceChunks(
+            supabase,
+            documentId,
+            document.company_id,
+            chunks,
+            allEmbeddings
           );
-          return {
-            url,
-            skipped: false,
-            chunks: result.chunks_stored || chunks.length,
-          };
+
+          console.log(
+            `[Insurance] Ingested ${chunksStored} chunks from ${url}`
+          );
+          return { url, skipped: false, chunks: chunksStored };
         }
       );
 
@@ -254,7 +208,7 @@ export const insuranceIngestionController = {
    */
   ingestSingle: async (c: AppContext) => {
     const startTime = Date.now();
-    const spineUrl = getSpineUrl(c.env as unknown as Record<string, unknown>);
+    const ai = c.env.AI;
 
     try {
       const body = await c.req.json<{
@@ -301,12 +255,28 @@ export const insuranceIngestionController = {
         });
       }
 
-      // 3. Send to spine for embedding + storage
-      const result = await sendToSpineForEmbedding(spineUrl, document, chunks);
-
-      if (!result.success) {
-        throw new Error(result.error || "Spine ingestion failed");
+      // 3. Generate embeddings locally via Workers AI
+      const texts = chunks.map((ch) => ch.text);
+      const allEmbeddings: number[][] = [];
+      for (
+        let i = 0;
+        i < texts.length;
+        i += INGESTION_CONFIG.EMBED_BATCH_SIZE
+      ) {
+        const batch = texts.slice(i, i + INGESTION_CONFIG.EMBED_BATCH_SIZE);
+        const batchEmbeddings = await generateEmbeddings(ai, batch);
+        allEmbeddings.push(...batchEmbeddings);
       }
+
+      // 4. Store document + chunks in Supabase
+      const documentId = await storeInsuranceDocument(supabase, document);
+      const chunksStored = await storeInsuranceChunks(
+        supabase,
+        documentId,
+        document.company_id,
+        chunks,
+        allEmbeddings
+      );
 
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 
@@ -320,7 +290,7 @@ export const insuranceIngestionController = {
           doc_type: document.doc_type,
           document_hash: document.document_hash,
         },
-        chunks_created: result.chunks_stored || chunks.length,
+        chunks_created: chunksStored,
         durationSeconds: parseFloat(duration),
         timestamp: new Date().toISOString(),
       });

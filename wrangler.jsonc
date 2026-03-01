@@ -20,10 +20,12 @@
   "keep_vars": false,
   "routes": ["finasaan.com/admin/api/*", "www.finasaan.com/admin/api/*"],
 
-  // Spine URL for cross-worker calls (e.g., insurance ingestion → spine embedding)
-  "vars": {
-    "SPINE_URL": "https://finasaan.com"
+  // Cloudflare Workers AI binding — used for insurance embedding generation
+  "ai": {
+    "binding": "AI"
   },
+
+  "vars": {},
 
   // Supabase environment variables (cloud-based)
   // These will be overridden by secrets in production
@@ -50,8 +52,7 @@
         "www.finasaan.com/admin/api/preview/*"
       ],
       "vars": {
-        "environment": "preview",
-        "SPINE_URL": "https://finasaan.com"
+        "environment": "preview"
       },
       "secrets_store_secrets": [
         {

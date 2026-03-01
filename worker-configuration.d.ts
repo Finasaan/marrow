@@ -7,6 +7,7 @@ declare namespace Cloudflare {
 	}
 	interface Env {
 		environment: "preview";
+		AI: Ai;
 		SUPABASE_URL_PRODUCTION: SecretsStoreSecret;
 		SUPABASE_ANON_KEY_PRODUCTION: SecretsStoreSecret;
 		ASSETS: Fetcher;

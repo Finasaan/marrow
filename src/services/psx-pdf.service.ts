@@ -171,10 +171,11 @@ interface ColumnMap {
 
 /**
  * Known header label patterns for each column we care about.
- * The PDF sometimes uses "CURRENT" or "LAST RATE" for close price.
+ * PDF uses "Company Name" as the first column (not "SYMBOL").
+ * Close price column is "Last Rate" in newer PDFs.
  */
 const HEADER_PATTERNS: Record<keyof ColumnMap, RegExp> = {
-  symbolX: /^SYMBOL$/i,
+  symbolX: /^COMPANY(?:\s+NAME)?$/i,
   openX: /^OPEN\s*(?:RATE)?$/i,
   highX: /^HIGH(?:EST)?$/i,
   lowX: /^LOW(?:EST)?$/i,
@@ -189,7 +190,8 @@ const HEADER_PATTERNS: Record<keyof ColumnMap, RegExp> = {
 function detectColumns(rows: TextItem[][]): ColumnMap | null {
   for (const row of rows) {
     const texts = row.map((item) => item.str.toUpperCase());
-    const hasSymbol = texts.some((t) => /^SYMBOL$/i.test(t));
+    // PDF uses "Company Name" (not "SYMBOL") as the first column header
+    const hasSymbol = texts.some((t) => /^COMPANY(?:\s+NAME)?$/.test(t));
     const hasTurnover = texts.some((t) => /^TURNOVER$/i.test(t));
 
     if (!hasSymbol || !hasTurnover) continue;
@@ -358,7 +360,10 @@ export async function parseClosingRatePDF(
         .trim();
 
       // Detect if this is a header row (column headers re-appearing on a new page)
-      if (fullRowText.includes("SYMBOL") && fullRowText.includes("TURNOVER")) {
+      if (
+        (fullRowText.includes("COMPANY") || fullRowText.includes("SYMBOL")) &&
+        fullRowText.includes("TURNOVER")
+      ) {
         inExcludedSection = false;
         continue; // Skip the header row itself
       }
