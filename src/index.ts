@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { apiReference } from "@scalar/hono-api-reference";
 import { router } from "./routes";
 
 /**
@@ -26,6 +27,13 @@ app.use(
 // ============================================
 // Routes
 // ============================================
+
+// Serve Scalar documentation at /docs
+// openapi.yaml is served statically by Cloudflare ASSETS at /openapi.yaml
+app.get("/docs", apiReference({
+  pageTitle: "Finasaan Marrow Admin API Docs",
+  url: "/openapi.yaml",
+}));
 
 // Mount all routes from router
 app.route("/", router);
