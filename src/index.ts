@@ -4,7 +4,7 @@ import { apiReference } from "@scalar/hono-api-reference";
 import { router } from "./routes";
 
 /**
- * Spine API - Finasaan Backend Service
+ * Marrow API - Finasaan Admin/Ingestion Backend Service
  * Main application entry point
  */
 const app = new Hono<{ Bindings: CloudflareBindings }>();

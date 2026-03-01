@@ -1,10 +1,12 @@
 /**
  * Insurance Ingestion Service
  * Handles PDF fetching, text extraction, Urdu stripping, table extraction,
- * SHA-256 hashing, and paragraph-aware chunking.
+ * SHA-256 hashing, paragraph-aware chunking, embedding generation, and storage.
  *
- * Marrow does preprocessing only — spine handles embeddings via internal API call.
+ * Fully self-contained — no cross-worker calls to spine.
  */
+
+import { SupabaseClient } from "@supabase/supabase-js";
 
 // ============================================================================
 // Types
@@ -502,3 +504,109 @@ export const INSURANCE_PDF_URLS: string[] = [
   "https://pqgtl.com.pk/wp-content/uploads/2023/10/Panel-Workshop-List-1.pdf",
   "https://pqgtl.com.pk/wp-content/uploads/2023/10/Motor-Claim-Guidelines-Final-1.pdf",
 ];
+
+// ============================================================================
+// Embedding Generation (Workers AI)
+// ============================================================================
+
+interface EmbeddingResponse {
+  data?: number[][];
+}
+
+/**
+ * Generate embeddings for multiple texts using Cloudflare Workers AI.
+ * Uses @cf/baai/bge-large-en-v1.5 (1024-dim vectors).
+ */
+export async function generateEmbeddings(
+  ai: Ai,
+  texts: string[]
+): Promise<number[][]> {
+  const response = (await ai.run("@cf/baai/bge-large-en-v1.5", {
+    text: texts,
+  })) as EmbeddingResponse;
+
+  if (!response.data) {
+    throw new Error("Failed to generate embeddings — no data returned");
+  }
+
+  return response.data;
+}
+
+// ============================================================================
+// Supabase Storage
+// ============================================================================
+
+/**
+ * Store an insurance document record and return its new UUID.
+ */
+export async function storeInsuranceDocument(
+  supabase: SupabaseClient,
+  doc: CleanedDocument
+): Promise<string> {
+  const { data, error } = await supabase
+    .from("insurance_documents")
+    .insert({
+      company_id: doc.company_id,
+      company_name: doc.company_name,
+      policy_name: doc.policy_name,
+      doc_type: doc.doc_type,
+      source_url: doc.source_url,
+      raw_text: doc.raw_text,
+      cleaned_text: doc.cleaned_text,
+      document_hash: doc.document_hash,
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to store insurance document: ${error.message}`);
+  }
+
+  return data.id;
+}
+
+/**
+ * Store insurance chunks with pre-generated embeddings.
+ * Inserts in batches of 50 to stay within Supabase payload limits.
+ * Returns the number of rows inserted.
+ */
+export async function storeInsuranceChunks(
+  supabase: SupabaseClient,
+  documentId: string,
+  companyId: string,
+  chunks: InsuranceChunkData[],
+  embeddings: number[][]
+): Promise<number> {
+  const rows = chunks.map((chunk, i) => ({
+    document_id: documentId,
+    company_id: companyId,
+    chunk_index: chunk.chunk_index,
+    chunk_type: chunk.chunk_type,
+    text: chunk.text,
+    embedding: JSON.stringify(embeddings[i]),
+    char_start: chunk.char_start,
+    char_end: chunk.char_end,
+    metadata: chunk.metadata,
+  }));
+
+  const BATCH_SIZE = 50;
+  let totalInserted = 0;
+
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE);
+    const { data, error } = await supabase
+      .from("insurance_chunks")
+      .insert(batch)
+      .select("id");
+
+    if (error) {
+      throw new Error(
+        `Failed to store insurance chunks (batch ${i}): ${error.message}`
+      );
+    }
+
+    totalInserted += data?.length || 0;
+  }
+
+  return totalInserted;
+}

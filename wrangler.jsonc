@@ -20,6 +20,13 @@
   "keep_vars": false,
   "routes": ["finasaan.com/admin/api/*", "www.finasaan.com/admin/api/*"],
 
+  // Cloudflare Workers AI binding — used for insurance embedding generation
+  "ai": {
+    "binding": "AI"
+  },
+
+  "vars": {},
+
   // Supabase environment variables (cloud-based)
   // These will be overridden by secrets in production
   // Use `wrangler secret put SUPABASE_URL` and `wrangler secret put SUPABASE_KEY` to set production secrets
