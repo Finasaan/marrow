@@ -20,17 +20,21 @@ import {
 const INGESTION_CONFIG = {
   /** Number of concurrent PDF downloads */
   CONCURRENCY: 3,
-  /** Spine URL for embedding — set SPINE_URL in .dev.vars or wrangler vars */
-  DEFAULT_SPINE_URL: "http://localhost:8787",
 };
 
 /**
- * Get spine URL from environment
+ * Get spine URL from environment.
+ * Requires SPINE_URL to be set in wrangler.jsonc vars or .dev.vars.
+ * Throws if missing — fail-fast is better than silently calling localhost in prod.
  */
 function getSpineUrl(env: Record<string, unknown>): string {
-  return (
-    (env.SPINE_URL as string) || INGESTION_CONFIG.DEFAULT_SPINE_URL
-  );
+  const url = env.SPINE_URL as string | undefined;
+  if (!url) {
+    throw new Error(
+      "SPINE_URL is not configured. Set it in wrangler.jsonc vars (prod/preview) or .dev.vars (local dev)."
+    );
+  }
+  return url;
 }
 
 /**

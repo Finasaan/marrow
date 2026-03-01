@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import { router } from "./routes";
 
 /**
- * Spine API - Finasaan Backend Service
+ * Marrow API - Finasaan Admin/Ingestion Backend Service
  * Main application entry point
  */
 const app = new Hono<{ Bindings: CloudflareBindings }>();

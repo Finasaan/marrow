@@ -20,6 +20,10 @@ import {
     getDateFromTicks,
     DailyOHLCV,
 } from "../services/psx-intraday.service";
+import {
+    downloadClosingRatePDF,
+    parseClosingRatePDF,
+} from "../services/psx-pdf.service";
 
 // ============================================================================
 // Configuration
@@ -233,8 +237,15 @@ export const psxIngestionController = {
     },
 
     /**
-     * Run ingestion for a specific date (for backfills)
+     * Run backfill for a specific date using PSX Closing Rate PDF
      * Date must be provided as query param: ?date=2025-12-17
+     *
+     * Flow:
+     * 1. Count-based idempotency check (skip if already fully backfilled)
+     * 2. Fetch valid symbols from DB (companies table)
+     * 3. Download & parse Closing Rate PDF from PSX
+     * 4. Filter: only rows whose symbol exists in DB, skip FUTURE CONTRACTS & BONDS
+     * 5. Upsert into daily_stock_data (overwrites partial data on retry)
      */
     runForDate: async (c: AppContext) => {
         const dateParam = c.req.query("date");
@@ -251,16 +262,34 @@ export const psxIngestionController = {
         const tradeDate = dateParam;
 
         const stats = {
-            companiesTotal: 0,
-            companiesProcessed: 0,
-            companiesSkipped: 0,
-            companiesFailed: 0,
-            rowsInserted: 0,
+            pdfRowsParsed: 0,
+            rowsMatched: 0,
+            rowsSkippedNoMatch: 0,
+            rowsUpserted: 0,
             errors: [] as string[],
         };
 
         try {
             const supabase = await getSupabaseClient(c.env);
+
+            // ========================================
+            // Step 1: Count-based idempotency check
+            // ========================================
+            console.log(`[PSX Backfill] Checking existing data for ${tradeDate}...`);
+
+            const { count: existingCount, error: countError } = await supabase
+                .from("daily_stock_data")
+                .select("*", { count: "exact", head: true })
+                .eq("trade_date", tradeDate);
+
+            if (countError) {
+                console.warn(`[PSX Backfill] Could not check existing data: ${countError.message}`);
+            }
+
+            // ========================================
+            // Step 2: Fetch valid symbols from DB
+            // ========================================
+            console.log("[PSX Backfill] Loading companies...");
 
             const { data: companies, error: companiesError } = await supabase
                 .from("companies")
@@ -278,35 +307,114 @@ export const psxIngestionController = {
                 }, 400);
             }
 
-            stats.companiesTotal = companies.length;
-
-            const dailyRows: DailyOHLCV[] = [];
-
-            const { results, errors } = await processBatched(
-                companies,
-                INGESTION_CONFIG.CONCURRENCY,
-                async (company) => {
-                    const ticks = await psxIntradayService.fetchIntradayTrades(company.symbol);
-                    const dailyData = aggregateIntradayToDaily(company.id, tradeDate, ticks);
-                    return { company, dailyData };
-                }
-            );
-
-            for (const { dailyData } of results) {
-                if (dailyData) {
-                    dailyRows.push(dailyData);
-                    stats.companiesProcessed++;
-                } else {
-                    stats.companiesSkipped++;
-                }
+            // Build symbol -> company_id lookup map
+            const symbolToId = new Map<string, string>();
+            for (const company of companies) {
+                symbolToId.set(company.symbol.toUpperCase(), company.id);
             }
 
-            for (const { item, error } of errors) {
-                stats.companiesFailed++;
-                stats.errors.push(`${item.symbol}: ${error}`);
+            const EXPECTED_MINIMUM = symbolToId.size;
+
+            // Check idempotency: fully backfilled if count >= expected minimum
+            if (existingCount !== null && existingCount !== undefined && existingCount >= EXPECTED_MINIMUM) {
+                const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+                console.log(`[PSX Backfill] Already have ${existingCount} rows for ${tradeDate} (expected ~${EXPECTED_MINIMUM}). Skipping.`);
+
+                return c.json({
+                    success: true,
+                    message: "Data already fully backfilled for this date",
+                    skipped: true,
+                    reason: `Already have ${existingCount} rows for ${tradeDate} (expected ~${EXPECTED_MINIMUM})`,
+                    tradeDate,
+                    stats: {
+                        ...stats,
+                        existingRows: existingCount,
+                        durationSeconds: parseFloat(duration),
+                    },
+                    timestamp: new Date().toISOString(),
+                });
             }
 
+            if (existingCount && existingCount > 0) {
+                console.log(`[PSX Backfill] Partial data found (${existingCount}/${EXPECTED_MINIMUM} rows). Will upsert to fill gaps.`);
+            }
+
+            // ========================================
+            // Step 3: Download & parse PDF
+            // ========================================
+            console.log(`[PSX Backfill] Downloading PDF for ${tradeDate}...`);
+
+            const pdfData = await downloadClosingRatePDF(tradeDate);
+
+            if (!pdfData) {
+                return c.json({
+                    success: false,
+                    error: `No closing rate PDF available for ${tradeDate} (possibly a weekend or holiday)`,
+                    timestamp: new Date().toISOString(),
+                }, 404);
+            }
+
+            console.log(`[PSX Backfill] Parsing PDF (${pdfData.length} bytes)...`);
+
+            const parsedRows = await parseClosingRatePDF(pdfData);
+            stats.pdfRowsParsed = parsedRows.length;
+
+            console.log(`[PSX Backfill] Parsed ${parsedRows.length} rows from PDF`);
+
+            if (parsedRows.length === 0) {
+                return c.json({
+                    success: false,
+                    error: `No stock data could be parsed from PDF for ${tradeDate}`,
+                    timestamp: new Date().toISOString(),
+                }, 422);
+            }
+
+            // ========================================
+            // Step 4: Filter to DB-known symbols only
+            // ========================================
+            interface BackfillRow {
+                company_id: string;
+                trade_date: string;
+                open_price: number;
+                high_price: number;
+                low_price: number;
+                close_price: number;
+                adjusted_close_price: number;
+                volume: number;
+            }
+
+            const dailyRows: BackfillRow[] = [];
+
+            for (const row of parsedRows) {
+                const companyId = symbolToId.get(row.symbol.toUpperCase());
+                if (!companyId) {
+                    stats.rowsSkippedNoMatch++;
+                    continue;
+                }
+
+                stats.rowsMatched++;
+
+                dailyRows.push({
+                    company_id: companyId,
+                    trade_date: tradeDate,
+                    open_price: row.open,
+                    high_price: row.high,
+                    low_price: row.low,
+                    close_price: row.close,
+                    adjusted_close_price: row.close, // Same as close for now
+                    volume: row.volume,
+                });
+            }
+
+            console.log(`[PSX Backfill] Matched ${dailyRows.length} rows to DB companies, skipped ${stats.rowsSkippedNoMatch} unknown symbols`);
+
+            // ========================================
+            // Step 5: Upsert into daily_stock_data
+            // Uses actual upsert (NOT ignoreDuplicates) to overwrite partial data
+            // ========================================
             if (dailyRows.length > 0) {
+                console.log(`[PSX Backfill] Upserting ${dailyRows.length} rows...`);
+
                 for (let i = 0; i < dailyRows.length; i += INGESTION_CONFIG.DB_BATCH_SIZE) {
                     const batch = dailyRows.slice(i, i + INGESTION_CONFIG.DB_BATCH_SIZE);
 
@@ -314,31 +422,35 @@ export const psxIngestionController = {
                         .from("daily_stock_data")
                         .upsert(batch, {
                             onConflict: "company_id,trade_date",
-                            ignoreDuplicates: true,
+                            ignoreDuplicates: false, // Overwrite on conflict (for partial failure recovery)
                         });
 
                     if (insertError) {
-                        stats.errors.push(`DB insert: ${insertError.message}`);
+                        stats.errors.push(`DB upsert batch ${Math.floor(i / INGESTION_CONFIG.DB_BATCH_SIZE)}: ${insertError.message}`);
+                        console.error(`[PSX Backfill] Upsert error:`, insertError);
                     } else {
-                        stats.rowsInserted += batch.length;
+                        stats.rowsUpserted += batch.length;
                     }
                 }
             }
 
             const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+            console.log(`[PSX Backfill] Completed in ${duration}s`);
 
             return c.json({
                 success: true,
-                message: `Stock ingestion for ${tradeDate} completed`,
+                message: `Backfill for ${tradeDate} completed`,
                 tradeDate,
                 stats: {
                     ...stats,
+                    existingRows: existingCount ?? 0,
                     durationSeconds: parseFloat(duration),
                     errorCount: stats.errors.length,
                 },
                 timestamp: new Date().toISOString(),
             });
         } catch (err) {
+            console.error("[PSX Backfill] Pipeline failed:", err);
             return c.json(errorResponse(err), 500);
         }
     },
