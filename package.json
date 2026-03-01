@@ -8,9 +8,7 @@
   "dependencies": {
     "@hono/node-server": "^1.15.0",
     "@supabase/supabase-js": "^2.49.4",
-    "hono": "^4.8.4"
-  },
-  "devDependencies": {
-    "wrangler": "^4.20.2"
+    "hono": "^4.8.4",
+    "unpdf": "^1.4.0"
   }
 }
