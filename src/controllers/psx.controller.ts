@@ -44,11 +44,10 @@ export const psxController = {
         .single();
 
       if (error) {
+        if (error.code === "PGRST116") {
+          return c.json({ success: false, error: `Company with id '${id}' not found` }, 404);
+        }
         return c.json({ success: false, error: error.message }, 500);
-      }
-
-      if (!data) {
-        return c.json({ success: false, error: "Company not found" }, 404);
       }
 
       return c.json({
@@ -75,12 +74,12 @@ export const psxController = {
         .eq("symbol", symbol.toUpperCase())
         .single();
 
+      // PGRST116 = no rows found — .single() throws this when 0 results
       if (error) {
+        if (error.code === "PGRST116") {
+          return c.json({ success: false, error: `Company with symbol '${symbol.toUpperCase()}' not found` }, 404);
+        }
         return c.json({ success: false, error: error.message }, 500);
-      }
-
-      if (!data) {
-        return c.json({ success: false, error: "Company not found" }, 404);
       }
 
       return c.json({

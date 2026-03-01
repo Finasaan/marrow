@@ -7,9 +7,7 @@ import { healthController } from "../controllers";
  */
 const healthRouter = new Hono<{ Bindings: CloudflareBindings }>();
 
-// Health and utility endpoints
+// Health check (includes DB connectivity check)
 healthRouter.get("/health", healthController.healthCheck);
-healthRouter.get("/message", healthController.message);
-healthRouter.get("/financial-tips", healthController.financialTips);
 
 export { healthRouter };
