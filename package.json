@@ -10,5 +10,8 @@
     "@supabase/supabase-js": "^2.49.4",
     "hono": "^4.8.4",
     "unpdf": "^1.4.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.51.0"
   }
 }
