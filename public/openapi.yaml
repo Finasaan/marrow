@@ -1,0 +1,724 @@
+openapi: 3.0.0
+info:
+  title: Finasaan Marrow API
+  description: |
+    Internal admin API for Finasaan — data ingestion and management for PSX stocks, mutual funds, and insurance documents.
+    
+    **Access:** Admin-only API. No authentication enforced (internal network only).
+  version: 1.0.0
+  contact:
+    name: Finasaan Team
+
+servers:
+  - url: http://localhost:8788/admin/api
+    description: Local development (Wrangler)
+  - url: https://api.finasaan.com/admin/api
+    description: Production
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: getHealth
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /psx/companies:
+    get:
+      summary: List all PSX companies
+      operationId: listPSXCompanies
+      tags:
+        - PSX
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of companies
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  companies:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        symbol:
+                          type: string
+                          example: ENGRO
+                        name:
+                          type: string
+                        sector:
+                          type: string
+                        market_cap:
+                          type: number
+
+  /psx/companies/{id}:
+    get:
+      summary: Get company by ID
+      operationId: getPSXCompanyById
+      tags:
+        - PSX
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Company details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  company:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      symbol:
+                        type: string
+                      name:
+                        type: string
+                      sector:
+                        type: string
+                      market_cap:
+                        type: number
+
+  /psx/companies/symbol/{symbol}:
+    get:
+      summary: Get company by symbol
+      operationId: getPSXCompanyBySymbol
+      tags:
+        - PSX
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+            example: ENGRO
+      responses:
+        '200':
+          description: Company details
+
+  /psx/companies/{companyId}/stock-data:
+    get:
+      summary: Get historical stock data
+      operationId: getPSXStockData
+      tags:
+        - PSX
+      parameters:
+        - name: companyId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        '200':
+          description: Historical stock data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date:
+                          type: string
+                          format: date
+                        open:
+                          type: number
+                        high:
+                          type: number
+                        low:
+                          type: number
+                        close:
+                          type: number
+                        volume:
+                          type: integer
+
+  /psx/companies/update/symbol:
+    post:
+      summary: Update company stock data by symbol
+      operationId: updatePSXCompanyBySymbol
+      tags:
+        - PSX
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - symbol
+              properties:
+                symbol:
+                  type: string
+                  example: ENGRO
+                force_refresh:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Company data updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  records_updated:
+                    type: integer
+
+  /psx/ingest/daily:
+    post:
+      summary: Ingest daily PSX market data
+      operationId: ingestDailyPSXData
+      tags:
+        - PSX Ingestion
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                date:
+                  type: string
+                  format: date
+                  description: Optional specific date (defaults to today)
+      responses:
+        '200':
+          description: Daily data ingestion successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  records_ingested:
+                    type: integer
+                  duration_seconds:
+                    type: number
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /psx/ingest/backfill:
+    post:
+      summary: Backfill historical PSX data (idempotent/resumable)
+      operationId: backfillPSXData
+      tags:
+        - PSX Ingestion
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                start_date:
+                  type: string
+                  format: date
+                  description: Start date for backfill (defaults to earliest available)
+                end_date:
+                  type: string
+                  format: date
+                  description: End date for backfill (defaults to today)
+                resume:
+                  type: boolean
+                  default: true
+                  description: Resume from last checkpoint if interrupted
+      responses:
+        '200':
+          description: Backfill completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  stats:
+                    type: object
+                    properties:
+                      total_records:
+                        type: integer
+                      new_records:
+                        type: integer
+                      duplicates_skipped:
+                        type: integer
+                      date_range:
+                        type: object
+                        properties:
+                          start:
+                            type: string
+                            format: date
+                          end:
+                            type: string
+                            format: date
+                  duration_seconds:
+                    type: number
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /mfs/providers:
+    get:
+      summary: List all mutual fund providers
+      operationId: listMFSProviders
+      tags:
+        - Mutual Funds
+      responses:
+        '200':
+          description: List of providers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+                        code:
+                          type: string
+
+  /mfs/funds:
+    get:
+      summary: List all mutual funds
+      operationId: listMFSFunds
+      tags:
+        - Mutual Funds
+      parameters:
+        - name: provider_id
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: List of funds
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  funds:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        symbol:
+                          type: string
+                        name:
+                          type: string
+                        provider:
+                          type: string
+                        category:
+                          type: string
+                        aum:
+                          type: number
+
+  /mfs/funds/{id}:
+    get:
+      summary: Get mutual fund by ID
+      operationId: getMFSFundById
+      tags:
+        - Mutual Funds
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Fund details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  fund:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      symbol:
+                        type: string
+                      name:
+                        type: string
+                      nav:
+                        type: number
+                      aum:
+                        type: number
+
+  /mfs/funds/symbol/{symbol}:
+    get:
+      summary: Get fund by symbol
+      operationId: getMFSFundBySymbol
+      tags:
+        - Mutual Funds
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Fund details
+
+  /mfs/funds/{fundId}/nav:
+    get:
+      summary: Get NAV history for a fund
+      operationId: getMFSFundNAV
+      tags:
+        - Mutual Funds
+      parameters:
+        - name: fundId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        '200':
+          description: NAV history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  nav_history:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date:
+                          type: string
+                          format: date
+                        nav:
+                          type: number
+                        units_outstanding:
+                          type: number
+
+  /mfs/ingest:
+    post:
+      summary: Full MFS ingestion (metadata + NAV history)
+      operationId: ingestMFSFull
+      tags:
+        - Mutual Funds Ingestion
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                provider_id:
+                  type: string
+                  description: Optional — ingest specific provider only
+                force_refresh:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Ingestion successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  stats:
+                    type: object
+                    properties:
+                      providers_processed:
+                        type: integer
+                      funds_created:
+                        type: integer
+                      funds_updated:
+                        type: integer
+                      nav_records_created:
+                        type: integer
+                  duration_seconds:
+                    type: number
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /mfs/ingest/phase1:
+    post:
+      summary: MFS metadata-only ingestion (faster)
+      operationId: ingestMFSPhase1
+      tags:
+        - Mutual Funds Ingestion
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                provider_id:
+                  type: string
+                  description: Optional — ingest specific provider only
+      responses:
+        '200':
+          description: Metadata ingestion successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  stats:
+                    type: object
+                    properties:
+                      providers_processed:
+                        type: integer
+                      funds_created:
+                        type: integer
+                      funds_updated:
+                        type: integer
+                  duration_seconds:
+                    type: number
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /insurance/ingest/run:
+    post:
+      summary: Run full insurance ingestion (all 24 PDFs)
+      operationId: runFullInsuranceIngestion
+      tags:
+        - Insurance Ingestion
+      responses:
+        '200':
+          description: Full ingestion pipeline completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  stats:
+                    type: object
+                    properties:
+                      totalPDFs:
+                        type: integer
+                      processed:
+                        type: integer
+                      skippedDuplicate:
+                        type: integer
+                      skippedError:
+                        type: integer
+                      chunksCreated:
+                        type: integer
+                      errors:
+                        type: array
+                        items:
+                          type: string
+                  durationSeconds:
+                    type: number
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /insurance/ingest/single:
+    post:
+      summary: Ingest a single insurance PDF
+      operationId: ingestSingleInsurancePDF
+      tags:
+        - Insurance Ingestion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - url
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  example: https://example.com/policy.pdf
+                company_id:
+                  type: string
+                  description: Optional — auto-extracted if not provided
+                company_name:
+                  type: string
+                  description: Optional — auto-extracted if not provided
+                policy_name:
+                  type: string
+                  description: Optional — extracted from PDF title
+                doc_type:
+                  type: string
+                  example: product_brochure
+      responses:
+        '200':
+          description: PDF ingested successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  document:
+                    type: object
+                    properties:
+                      company_id:
+                        type: string
+                      company_name:
+                        type: string
+                      policy_name:
+                        type: string
+                      doc_type:
+                        type: string
+                      document_hash:
+                        type: string
+                  chunks_created:
+                    type: integer
+                  durationSeconds:
+                    type: number
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          description: Missing URL or validation error
+        '409':
+          description: Document already ingested (duplicate hash)
+
+  /insurance/documents:
+    get:
+      summary: List all ingested insurance documents
+      operationId: listInsuranceDocuments
+      tags:
+        - Insurance Ingestion
+      responses:
+        '200':
+          description: List of ingested documents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  documents:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        company_id:
+                          type: string
+                        company_name:
+                          type: string
+                        policy_name:
+                          type: string
+                        doc_type:
+                          type: string
+                        source_url:
+                          type: string
+                          format: uri
+                        document_hash:
+                          type: string
+                        created_at:
+                          type: string
+                          format: date-time
+                  count:
+                    type: integer
+                  timestamp:
+                    type: string
+                    format: date-time
