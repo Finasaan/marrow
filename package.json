@@ -3,7 +3,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy --minify",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+    "build:cf": "wrangler deploy --dry-run",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "prepare": "husky"
   },
   "dependencies": {
     "@hono/node-server": "^1.15.0",
@@ -12,6 +14,7 @@
     "unpdf": "^1.4.0"
   },
   "devDependencies": {
+    "husky": "^9.1.7",
     "wrangler": "^4.51.0"
   }
 }
