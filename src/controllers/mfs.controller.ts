@@ -44,11 +44,10 @@ export const mfsController = {
         .single();
 
       if (error) {
+        if (error.code === "PGRST116") {
+          return c.json({ success: false, error: `Mutual fund with id '${id}' not found` }, 404);
+        }
         return c.json({ success: false, error: error.message }, 500);
-      }
-
-      if (!data) {
-        return c.json({ success: false, error: "Mutual fund not found" }, 404);
       }
 
       return c.json({
@@ -76,11 +75,10 @@ export const mfsController = {
         .single();
 
       if (error) {
+        if (error.code === "PGRST116") {
+          return c.json({ success: false, error: `Mutual fund with symbol '${symbol.toUpperCase()}' not found` }, 404);
+        }
         return c.json({ success: false, error: error.message }, 500);
-      }
-
-      if (!data) {
-        return c.json({ success: false, error: "Mutual fund not found" }, 404);
       }
 
       return c.json({
