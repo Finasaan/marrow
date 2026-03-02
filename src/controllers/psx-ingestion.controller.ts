@@ -12,6 +12,7 @@
 
 import { getSupabaseClient } from "../db";
 import { AppContext, errorResponse } from "../types";
+import { SupabaseClient } from "@supabase/supabase-js";
 import {
     psxIntradayService,
     aggregateIntradayToDaily,
@@ -35,6 +36,159 @@ const INGESTION_CONFIG = {
     /** Batch size for DB inserts */
     DB_BATCH_SIZE: 100,
 };
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+interface BackfillDateResult {
+    date: string;
+    skipped: boolean;
+    skipReason?: string;
+    pdfRowsParsed: number;
+    rowsMatched: number;
+    rowsUpserted: number;
+    rowsSkippedNoMatch: number;
+    durationSeconds: number;
+    error?: string;
+}
+
+/**
+ * Core single-date backfill logic, reused by both runForDate and runForDateRange.
+ * Companies map is pre-loaded by the caller to avoid redundant DB queries.
+ */
+async function backfillDateCore(
+    supabase: SupabaseClient,
+    tradeDate: string,
+    symbolToId: Map<string, string>,
+    dbBatchSize: number
+): Promise<BackfillDateResult> {
+    const startTime = Date.now();
+    const EXPECTED_MINIMUM = symbolToId.size;
+
+    // Idempotency check
+    const { count: existingCount } = await supabase
+        .from("daily_stock_data")
+        .select("*", { count: "exact", head: true })
+        .eq("trade_date", tradeDate);
+
+    if (existingCount !== null && existingCount !== undefined && existingCount >= EXPECTED_MINIMUM) {
+        return {
+            date: tradeDate,
+            skipped: true,
+            skipReason: `Already have ${existingCount} rows (expected ~${EXPECTED_MINIMUM})`,
+            pdfRowsParsed: 0,
+            rowsMatched: 0,
+            rowsUpserted: 0,
+            rowsSkippedNoMatch: 0,
+            durationSeconds: parseFloat(((Date.now() - startTime) / 1000).toFixed(2)),
+        };
+    }
+
+    // Download PDF
+    const pdfData = await downloadClosingRatePDF(tradeDate);
+    if (!pdfData) {
+        return {
+            date: tradeDate,
+            skipped: true,
+            skipReason: "No PDF available (weekend or holiday)",
+            pdfRowsParsed: 0,
+            rowsMatched: 0,
+            rowsUpserted: 0,
+            rowsSkippedNoMatch: 0,
+            durationSeconds: parseFloat(((Date.now() - startTime) / 1000).toFixed(2)),
+        };
+    }
+
+    // Parse PDF
+    const parsedRows = await parseClosingRatePDF(pdfData);
+    if (parsedRows.length === 0) {
+        return {
+            date: tradeDate,
+            skipped: false,
+            pdfRowsParsed: 0,
+            rowsMatched: 0,
+            rowsUpserted: 0,
+            rowsSkippedNoMatch: 0,
+            durationSeconds: parseFloat(((Date.now() - startTime) / 1000).toFixed(2)),
+            error: "PDF parsed but contained no stock rows",
+        };
+    }
+
+    // Map to DB rows
+    interface BackfillRow {
+        company_id: string;
+        trade_date: string;
+        open_price: number;
+        high_price: number;
+        low_price: number;
+        close_price: number;
+        adjusted_close_price: number;
+        volume: number;
+    }
+
+    const dailyRows: BackfillRow[] = [];
+    let rowsSkippedNoMatch = 0;
+
+    for (const row of parsedRows) {
+        const companyId = symbolToId.get(row.symbol.toUpperCase());
+        if (!companyId) { rowsSkippedNoMatch++; continue; }
+        dailyRows.push({
+            company_id: companyId,
+            trade_date: tradeDate,
+            open_price: row.open,
+            high_price: row.high,
+            low_price: row.low,
+            close_price: row.close,
+            adjusted_close_price: row.close,
+            volume: row.volume,
+        });
+    }
+
+    // Upsert
+    let rowsUpserted = 0;
+    const errors: string[] = [];
+    for (let i = 0; i < dailyRows.length; i += dbBatchSize) {
+        const batch = dailyRows.slice(i, i + dbBatchSize);
+        const { error: insertError } = await supabase
+            .from("daily_stock_data")
+            .upsert(batch, { onConflict: "company_id,trade_date", ignoreDuplicates: false });
+        if (insertError) {
+            errors.push(insertError.message);
+        } else {
+            rowsUpserted += batch.length;
+        }
+    }
+
+    return {
+        date: tradeDate,
+        skipped: false,
+        pdfRowsParsed: parsedRows.length,
+        rowsMatched: dailyRows.length,
+        rowsUpserted,
+        rowsSkippedNoMatch,
+        durationSeconds: parseFloat(((Date.now() - startTime) / 1000).toFixed(2)),
+        error: errors.length > 0 ? errors.join("; ") : undefined,
+    };
+}
+
+/**
+ * Generate all calendar dates (YYYY-MM-DD) between from and to inclusive,
+ * excluding weekends (Saturday=6, Sunday=0).
+ */
+function getWeekdaysInRange(from: string, to: string): string[] {
+    const dates: string[] = [];
+    const current = new Date(from + "T12:00:00Z");
+    const end = new Date(to + "T12:00:00Z");
+    while (current <= end) {
+        const day = current.getUTCDay();
+        if (day !== 0 && day !== 6) {
+            dates.push(current.toISOString().slice(0, 10));
+        }
+        current.setUTCDate(current.getUTCDate() + 1);
+    }
+    return dates;
+}
 
 // ============================================================================
 // Controller
@@ -258,199 +412,128 @@ export const psxIngestionController = {
             }, 400);
         }
 
-        const startTime = Date.now();
-        const tradeDate = dateParam;
-
-        const stats = {
-            pdfRowsParsed: 0,
-            rowsMatched: 0,
-            rowsSkippedNoMatch: 0,
-            rowsUpserted: 0,
-            errors: [] as string[],
-        };
-
         try {
             const supabase = await getSupabaseClient(c.env);
-
-            // ========================================
-            // Step 1: Count-based idempotency check
-            // ========================================
-            console.log(`[PSX Backfill] Checking existing data for ${tradeDate}...`);
-
-            const { count: existingCount, error: countError } = await supabase
-                .from("daily_stock_data")
-                .select("*", { count: "exact", head: true })
-                .eq("trade_date", tradeDate);
-
-            if (countError) {
-                console.warn(`[PSX Backfill] Could not check existing data: ${countError.message}`);
-            }
-
-            // ========================================
-            // Step 2: Fetch valid symbols from DB
-            // ========================================
-            console.log("[PSX Backfill] Loading companies...");
 
             const { data: companies, error: companiesError } = await supabase
                 .from("companies")
                 .select("id, symbol");
 
-            if (companiesError) {
-                throw new Error(`Failed to load companies: ${companiesError.message}`);
+            if (companiesError || !companies?.length) {
+                return c.json({ success: false, error: "Failed to load companies", timestamp: new Date().toISOString() }, 500);
             }
 
-            if (!companies || companies.length === 0) {
-                return c.json({
-                    success: false,
-                    error: "No companies found in database",
-                    timestamp: new Date().toISOString(),
-                }, 400);
-            }
-
-            // Build symbol -> company_id lookup map
             const symbolToId = new Map<string, string>();
             for (const company of companies) {
                 symbolToId.set(company.symbol.toUpperCase(), company.id);
             }
 
-            const EXPECTED_MINIMUM = symbolToId.size;
+            console.log(`[PSX Backfill] Running for ${dateParam}...`);
+            const result = await backfillDateCore(supabase, dateParam, symbolToId, INGESTION_CONFIG.DB_BATCH_SIZE);
 
-            // Check idempotency: fully backfilled if count >= expected minimum
-            if (existingCount !== null && existingCount !== undefined && existingCount >= EXPECTED_MINIMUM) {
-                const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-                console.log(`[PSX Backfill] Already have ${existingCount} rows for ${tradeDate} (expected ~${EXPECTED_MINIMUM}). Skipping.`);
-
-                return c.json({
-                    success: true,
-                    message: "Data already fully backfilled for this date",
-                    skipped: true,
-                    reason: `Already have ${existingCount} rows for ${tradeDate} (expected ~${EXPECTED_MINIMUM})`,
-                    tradeDate,
-                    stats: {
-                        ...stats,
-                        existingRows: existingCount,
-                        durationSeconds: parseFloat(duration),
-                    },
-                    timestamp: new Date().toISOString(),
-                });
+            if (result.error) {
+                return c.json({ success: false, ...result, timestamp: new Date().toISOString() }, 422);
             }
-
-            if (existingCount && existingCount > 0) {
-                console.log(`[PSX Backfill] Partial data found (${existingCount}/${EXPECTED_MINIMUM} rows). Will upsert to fill gaps.`);
-            }
-
-            // ========================================
-            // Step 3: Download & parse PDF
-            // ========================================
-            console.log(`[PSX Backfill] Downloading PDF for ${tradeDate}...`);
-
-            const pdfData = await downloadClosingRatePDF(tradeDate);
-
-            if (!pdfData) {
-                return c.json({
-                    success: false,
-                    error: `No closing rate PDF available for ${tradeDate} (possibly a weekend or holiday)`,
-                    timestamp: new Date().toISOString(),
-                }, 404);
-            }
-
-            console.log(`[PSX Backfill] Parsing PDF (${pdfData.length} bytes)...`);
-
-            const parsedRows = await parseClosingRatePDF(pdfData);
-            stats.pdfRowsParsed = parsedRows.length;
-
-            console.log(`[PSX Backfill] Parsed ${parsedRows.length} rows from PDF`);
-
-            if (parsedRows.length === 0) {
-                return c.json({
-                    success: false,
-                    error: `No stock data could be parsed from PDF for ${tradeDate}`,
-                    timestamp: new Date().toISOString(),
-                }, 422);
-            }
-
-            // ========================================
-            // Step 4: Filter to DB-known symbols only
-            // ========================================
-            interface BackfillRow {
-                company_id: string;
-                trade_date: string;
-                open_price: number;
-                high_price: number;
-                low_price: number;
-                close_price: number;
-                adjusted_close_price: number;
-                volume: number;
-            }
-
-            const dailyRows: BackfillRow[] = [];
-
-            for (const row of parsedRows) {
-                const companyId = symbolToId.get(row.symbol.toUpperCase());
-                if (!companyId) {
-                    stats.rowsSkippedNoMatch++;
-                    continue;
-                }
-
-                stats.rowsMatched++;
-
-                dailyRows.push({
-                    company_id: companyId,
-                    trade_date: tradeDate,
-                    open_price: row.open,
-                    high_price: row.high,
-                    low_price: row.low,
-                    close_price: row.close,
-                    adjusted_close_price: row.close, // Same as close for now
-                    volume: row.volume,
-                });
-            }
-
-            console.log(`[PSX Backfill] Matched ${dailyRows.length} rows to DB companies, skipped ${stats.rowsSkippedNoMatch} unknown symbols`);
-
-            // ========================================
-            // Step 5: Upsert into daily_stock_data
-            // Uses actual upsert (NOT ignoreDuplicates) to overwrite partial data
-            // ========================================
-            if (dailyRows.length > 0) {
-                console.log(`[PSX Backfill] Upserting ${dailyRows.length} rows...`);
-
-                for (let i = 0; i < dailyRows.length; i += INGESTION_CONFIG.DB_BATCH_SIZE) {
-                    const batch = dailyRows.slice(i, i + INGESTION_CONFIG.DB_BATCH_SIZE);
-
-                    const { error: insertError } = await supabase
-                        .from("daily_stock_data")
-                        .upsert(batch, {
-                            onConflict: "company_id,trade_date",
-                            ignoreDuplicates: false, // Overwrite on conflict (for partial failure recovery)
-                        });
-
-                    if (insertError) {
-                        stats.errors.push(`DB upsert batch ${Math.floor(i / INGESTION_CONFIG.DB_BATCH_SIZE)}: ${insertError.message}`);
-                        console.error(`[PSX Backfill] Upsert error:`, insertError);
-                    } else {
-                        stats.rowsUpserted += batch.length;
-                    }
-                }
-            }
-
-            const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-            console.log(`[PSX Backfill] Completed in ${duration}s`);
 
             return c.json({
                 success: true,
-                message: `Backfill for ${tradeDate} completed`,
-                tradeDate,
-                stats: {
-                    ...stats,
-                    existingRows: existingCount ?? 0,
-                    durationSeconds: parseFloat(duration),
-                    errorCount: stats.errors.length,
-                },
+                message: result.skipped
+                    ? `Skipped: ${result.skipReason}`
+                    : `Backfill for ${dateParam} completed`,
+                ...result,
                 timestamp: new Date().toISOString(),
             });
         } catch (err) {
             console.error("[PSX Backfill] Pipeline failed:", err);
+            return c.json(errorResponse(err), 500);
+        }
+    },
+
+    /**
+     * Backfill a date range
+     * POST /admin/api/psx/ingest/backfill/range?from=YYYY-MM-DD&to=YYYY-MM-DD
+     *
+     * Iterates every weekday in the range, skips weekends + holidays (no PDF),
+     * skips already-filled dates. Max 60 weekdays per request.
+     */
+    runForDateRange: async (c: AppContext) => {
+        const fromParam = c.req.query("from");
+        const toParam = c.req.query("to");
+        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+
+        if (!fromParam || !toParam || !dateRe.test(fromParam) || !dateRe.test(toParam)) {
+            return c.json({
+                success: false,
+                error: "Use ?from=YYYY-MM-DD&to=YYYY-MM-DD",
+                timestamp: new Date().toISOString(),
+            }, 400);
+        }
+
+        if (fromParam > toParam) {
+            return c.json({ success: false, error: "'from' must be before or equal to 'to'", timestamp: new Date().toISOString() }, 400);
+        }
+
+        // PDF parsing is CPU-intensive (~500ms CPU per date).
+        // Cloudflare Workers paid tier has a 30s CPU limit.
+        // Cap at 7 dates (~3.5s CPU) to stay well within limits.
+        const MAX_DAYS = 7;
+        const weekdays = getWeekdaysInRange(fromParam, toParam);
+        if (weekdays.length > MAX_DAYS) {
+            return c.json({
+                success: false,
+                error: `Date range spans ${weekdays.length} weekdays. Max is ${MAX_DAYS} per request (PDF parsing is CPU-intensive). Split into smaller ranges.`,
+                timestamp: new Date().toISOString(),
+            }, 400);
+        }
+
+        const overallStart = Date.now();
+
+        try {
+            const supabase = await getSupabaseClient(c.env);
+
+            // Load companies once for the whole range
+            const { data: companies, error: companiesError } = await supabase
+                .from("companies")
+                .select("id, symbol");
+
+            if (companiesError || !companies?.length) {
+                return c.json({ success: false, error: "Failed to load companies", timestamp: new Date().toISOString() }, 500);
+            }
+
+            const symbolToId = new Map<string, string>();
+            for (const company of companies) {
+                symbolToId.set(company.symbol.toUpperCase(), company.id);
+            }
+
+            console.log(`[PSX Range Backfill] Processing ${weekdays.length} weekdays from ${fromParam} to ${toParam}`);
+
+            const results: BackfillDateResult[] = [];
+            for (const date of weekdays) {
+                console.log(`[PSX Range Backfill] → ${date}`);
+                const result = await backfillDateCore(supabase, date, symbolToId, INGESTION_CONFIG.DB_BATCH_SIZE);
+                results.push(result);
+            }
+
+            const summary = {
+                totalDates: weekdays.length,
+                processed: results.filter(r => !r.skipped && !r.error).length,
+                skipped: results.filter(r => r.skipped).length,
+                failed: results.filter(r => !r.skipped && r.error).length,
+                totalRowsUpserted: results.reduce((sum, r) => sum + r.rowsUpserted, 0),
+                durationSeconds: parseFloat(((Date.now() - overallStart) / 1000).toFixed(2)),
+            };
+
+            console.log(`[PSX Range Backfill] Done. ${summary.processed} processed, ${summary.skipped} skipped, ${summary.failed} failed in ${summary.durationSeconds}s`);
+
+            return c.json({
+                success: true,
+                message: `Range backfill ${fromParam} → ${toParam} completed`,
+                summary,
+                results,
+                timestamp: new Date().toISOString(),
+            });
+        } catch (err) {
+            console.error("[PSX Range Backfill] Failed:", err);
             return c.json(errorResponse(err), 500);
         }
     },
