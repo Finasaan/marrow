@@ -3,8 +3,9 @@
  * Orchestrates the insurance PDF ingestion pipeline:
  * 1. Fetch & preprocess PDFs
  * 2. Check Supabase for duplicate hashes
- * 3. Generate embeddings via Workers AI (own AI binding — no spine dependency)
- * 4. Store documents + chunks directly in Supabase
+ * 3. Generate embeddings via Workers AI for BODY chunks only
+ * 4. Send TABLE chunks to spine for LLM structuring (not vectorized)
+ * 5. Store documents + body chunks directly in Supabase
  */
 
 import { getSupabaseClient } from "../db";
@@ -15,6 +16,8 @@ import {
   generateEmbeddings,
   storeInsuranceDocument,
   storeInsuranceChunks,
+  InsuranceChunkData,
+  CleanedDocument,
 } from "../services/insurance-ingestion.service";
 
 // ============================================================================
@@ -86,6 +89,74 @@ async function processBatched<T, R>(
 }
 
 // ============================================================================
+// Spine Integration — Table Extraction
+// ============================================================================
+
+/**
+ * Get the spine URL from environment, fail-fast if missing.
+ */
+function getSpineUrl(env: CloudflareBindings): string {
+  const url = (env as unknown as { SPINE_URL: string }).SPINE_URL;
+  if (!url) {
+    throw new Error("SPINE_URL is not configured — cannot call spine for table extraction");
+  }
+  return url;
+}
+
+/**
+ * Send a raw table chunk to spine's extraction endpoint for LLM structuring.
+ * Returns the structured table data, or null if extraction fails (non-fatal).
+ */
+async function sendTableToSpine(
+  spineUrl: string,
+  chunk: InsuranceChunkData,
+  document: CleanedDocument,
+  documentId: string
+): Promise<{ table_id: string } | null> {
+  try {
+    const response = await fetch(`${spineUrl}/api/extract/structure-table`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        raw_table_text: chunk.text,
+        source_document_id: documentId,
+        source_type: "insurance",
+        company_id: document.company_id,
+        company_name: document.company_name,
+        policy_name: document.policy_name,
+        doc_type: document.doc_type,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.warn(
+        `[Insurance] Table extraction failed (${response.status}): ${errorText}`
+      );
+      return null;
+    }
+
+    const result = (await response.json()) as {
+      success: boolean;
+      table_id?: string;
+      error?: string;
+    };
+
+    if (!result.success) {
+      console.warn(`[Insurance] Table extraction returned error: ${result.error}`);
+      return null;
+    }
+
+    return { table_id: result.table_id! };
+  } catch (err) {
+    console.warn(
+      `[Insurance] Table extraction call failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return null;
+  }
+}
+
+// ============================================================================
 // Controller
 // ============================================================================
 
@@ -109,12 +180,15 @@ export const insuranceIngestionController = {
       processed: 0,
       skippedDuplicate: 0,
       skippedError: 0,
-      chunksCreated: 0,
+      bodyChunksCreated: 0,
+      tablesExtracted: 0,
+      tablesFailed: 0,
       errors: [] as string[],
     };
 
     try {
       const supabase = await getSupabaseClient(c.env);
+      const spineUrl = getSpineUrl(c.env);
 
       console.log(
         `[Insurance] Starting ingestion of ${INSURANCE_PDF_URLS.length} PDFs`
@@ -134,36 +208,67 @@ export const insuranceIngestionController = {
           );
           if (exists) {
             console.log(`[Insurance] Skipping duplicate: ${url}`);
-            return { url, skipped: true, chunks: 0 };
+            return { url, skipped: true, bodyChunks: 0, tables: 0, tablesFailed: 0 };
           }
 
-          // 3. Generate embeddings locally via Workers AI
-          const texts = chunks.map((ch) => ch.text);
+          // 3. Separate body chunks from table chunks
+          const bodyChunks = chunks.filter((ch) => ch.chunk_type === "body");
+          const tableChunks = chunks.filter((ch) => ch.chunk_type === "table");
+
+          console.log(
+            `[Insurance] ${url}: ${bodyChunks.length} body chunks, ${tableChunks.length} table chunks`
+          );
+
+          // 4. Generate embeddings ONLY for body chunks
+          const bodyTexts = bodyChunks.map((ch) => ch.text);
           const allEmbeddings: number[][] = [];
           for (
             let i = 0;
-            i < texts.length;
+            i < bodyTexts.length;
             i += INGESTION_CONFIG.EMBED_BATCH_SIZE
           ) {
-            const batch = texts.slice(i, i + INGESTION_CONFIG.EMBED_BATCH_SIZE);
+            const batch = bodyTexts.slice(i, i + INGESTION_CONFIG.EMBED_BATCH_SIZE);
             const batchEmbeddings = await generateEmbeddings(ai, batch);
             allEmbeddings.push(...batchEmbeddings);
           }
 
-          // 4. Store document + chunks in Supabase
+          // 5. Store document + body chunks in Supabase
           const documentId = await storeInsuranceDocument(supabase, document);
-          const chunksStored = await storeInsuranceChunks(
+          const bodyChunksStored = await storeInsuranceChunks(
             supabase,
             documentId,
             document.company_id,
-            chunks,
+            bodyChunks,
             allEmbeddings
           );
 
+          // 6. Send table chunks to spine for LLM structuring (non-fatal on failure)
+          let tablesOk = 0;
+          let tablesFail = 0;
+          for (const tableChunk of tableChunks) {
+            const result = await sendTableToSpine(
+              spineUrl,
+              tableChunk,
+              document,
+              documentId
+            );
+            if (result) {
+              tablesOk++;
+            } else {
+              tablesFail++;
+            }
+          }
+
           console.log(
-            `[Insurance] Ingested ${chunksStored} chunks from ${url}`
+            `[Insurance] Ingested ${bodyChunksStored} body chunks, ${tablesOk}/${tableChunks.length} tables from ${url}`
           );
-          return { url, skipped: false, chunks: chunksStored };
+          return {
+            url,
+            skipped: false,
+            bodyChunks: bodyChunksStored,
+            tables: tablesOk,
+            tablesFailed: tablesFail,
+          };
         }
       );
 
@@ -173,7 +278,9 @@ export const insuranceIngestionController = {
           stats.skippedDuplicate++;
         } else {
           stats.processed++;
-          stats.chunksCreated += r.chunks;
+          stats.bodyChunksCreated += r.bodyChunks;
+          stats.tablesExtracted += r.tables;
+          stats.tablesFailed += r.tablesFailed;
         }
       }
 
@@ -231,6 +338,7 @@ export const insuranceIngestionController = {
       }
 
       const supabase = await getSupabaseClient(c.env);
+      const spineUrl = getSpineUrl(c.env);
 
       // 1. Process the PDF
       const { document, chunks } = await processInsurancePDF(body.url, {
@@ -255,28 +363,49 @@ export const insuranceIngestionController = {
         });
       }
 
-      // 3. Generate embeddings locally via Workers AI
-      const texts = chunks.map((ch) => ch.text);
+      // 3. Separate body chunks from table chunks
+      const bodyChunks = chunks.filter((ch) => ch.chunk_type === "body");
+      const tableChunks = chunks.filter((ch) => ch.chunk_type === "table");
+
+      // 4. Generate embeddings ONLY for body chunks
+      const bodyTexts = bodyChunks.map((ch) => ch.text);
       const allEmbeddings: number[][] = [];
       for (
         let i = 0;
-        i < texts.length;
+        i < bodyTexts.length;
         i += INGESTION_CONFIG.EMBED_BATCH_SIZE
       ) {
-        const batch = texts.slice(i, i + INGESTION_CONFIG.EMBED_BATCH_SIZE);
+        const batch = bodyTexts.slice(i, i + INGESTION_CONFIG.EMBED_BATCH_SIZE);
         const batchEmbeddings = await generateEmbeddings(ai, batch);
         allEmbeddings.push(...batchEmbeddings);
       }
 
-      // 4. Store document + chunks in Supabase
+      // 5. Store document + body chunks in Supabase
       const documentId = await storeInsuranceDocument(supabase, document);
-      const chunksStored = await storeInsuranceChunks(
+      const bodyChunksStored = await storeInsuranceChunks(
         supabase,
         documentId,
         document.company_id,
-        chunks,
+        bodyChunks,
         allEmbeddings
       );
+
+      // 6. Send table chunks to spine for LLM structuring
+      let tablesExtracted = 0;
+      let tablesFailed = 0;
+      for (const tableChunk of tableChunks) {
+        const result = await sendTableToSpine(
+          spineUrl,
+          tableChunk,
+          document,
+          documentId
+        );
+        if (result) {
+          tablesExtracted++;
+        } else {
+          tablesFailed++;
+        }
+      }
 
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 
@@ -290,7 +419,9 @@ export const insuranceIngestionController = {
           doc_type: document.doc_type,
           document_hash: document.document_hash,
         },
-        chunks_created: chunksStored,
+        body_chunks_created: bodyChunksStored,
+        tables_extracted: tablesExtracted,
+        tables_failed: tablesFailed,
         durationSeconds: parseFloat(duration),
         timestamp: new Date().toISOString(),
       });
