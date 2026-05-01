@@ -25,7 +25,9 @@
     "binding": "AI"
   },
 
-  "vars": {},
+  "vars": {
+    "AI_GATEWAY_TOKEN": ""
+  },
 
   // Supabase environment variables (cloud-based)
   // These will be overridden by secrets in production

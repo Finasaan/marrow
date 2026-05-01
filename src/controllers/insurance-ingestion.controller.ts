@@ -173,7 +173,7 @@ export const insuranceIngestionController = {
    */
   runFullIngestion: async (c: AppContext) => {
     const startTime = Date.now();
-    const ai = c.env.AI;
+    const apiToken = c.env.AI_GATEWAY_TOKEN;
 
     const stats = {
       totalPDFs: INSURANCE_PDF_URLS.length,
@@ -228,7 +228,7 @@ export const insuranceIngestionController = {
             i += INGESTION_CONFIG.EMBED_BATCH_SIZE
           ) {
             const batch = bodyTexts.slice(i, i + INGESTION_CONFIG.EMBED_BATCH_SIZE);
-            const batchEmbeddings = await generateEmbeddings(ai, batch);
+            const batchEmbeddings = await generateEmbeddings(apiToken, batch);
             allEmbeddings.push(...batchEmbeddings);
           }
 
@@ -315,7 +315,7 @@ export const insuranceIngestionController = {
    */
   ingestSingle: async (c: AppContext) => {
     const startTime = Date.now();
-    const ai = c.env.AI;
+    const apiToken = c.env.AI_GATEWAY_TOKEN;
 
     try {
       const body = await c.req.json<{
@@ -376,7 +376,7 @@ export const insuranceIngestionController = {
         i += INGESTION_CONFIG.EMBED_BATCH_SIZE
       ) {
         const batch = bodyTexts.slice(i, i + INGESTION_CONFIG.EMBED_BATCH_SIZE);
-        const batchEmbeddings = await generateEmbeddings(ai, batch);
+        const batchEmbeddings = await generateEmbeddings(apiToken, batch);
         allEmbeddings.push(...batchEmbeddings);
       }
 

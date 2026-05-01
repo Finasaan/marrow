@@ -506,30 +506,49 @@ export const INSURANCE_PDF_URLS: string[] = [
 ];
 
 // ============================================================================
-// Embedding Generation (Workers AI)
+// Embedding Generation (Workers AI REST API)
 // ============================================================================
 
-interface EmbeddingResponse {
-  data?: number[][];
-}
+const CF_ACCOUNT_ID = "345590cd19a379d6bf1008c6a7860451";
 
 /**
- * Generate embeddings for multiple texts using Cloudflare Workers AI.
+ * Generate embeddings for multiple texts using the Cloudflare Workers AI REST API.
  * Uses @cf/baai/bge-large-en-v1.5 (1024-dim vectors).
+ * Uses the REST API instead of the AI binding to work in local dev without --remote.
  */
 export async function generateEmbeddings(
-  ai: Ai,
+  apiToken: string,
   texts: string[]
 ): Promise<number[][]> {
-  const response = (await ai.run("@cf/baai/bge-large-en-v1.5", {
-    text: texts,
-  })) as EmbeddingResponse;
+  const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/baai/bge-large-en-v1.5`;
 
-  if (!response.data) {
-    throw new Error("Failed to generate embeddings — no data returned");
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ text: texts }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Workers AI embeddings failed (${response.status}): ${err}`);
   }
 
-  return response.data;
+  const result = (await response.json()) as {
+    success: boolean;
+    result?: { data: number[][] };
+    errors?: Array<{ message: string }>;
+  };
+
+  if (!result.success || !result.result?.data) {
+    throw new Error(
+      `Workers AI embeddings error: ${JSON.stringify(result.errors)}`
+    );
+  }
+
+  return result.result.data;
 }
 
 // ============================================================================
