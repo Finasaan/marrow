@@ -35,7 +35,7 @@ const INGESTION_CONFIG = {
  * Check if a document hash already exists in insurance_documents
  */
 async function documentHashExists(
-  supabase: ReturnType<typeof import("@supabase/supabase-js").createClient>,
+  supabase: any,
   hash: string
 ): Promise<boolean> {
   const { data, error } = await supabase
@@ -202,7 +202,7 @@ export const insuranceIngestionController = {
           const { document, chunks } = await processInsurancePDF(url);
 
           // 2. Check for duplicate hash
-          const exists = await documentHashExists(
+          const exists = await (documentHashExists as any)(
             supabase,
             document.document_hash
           );
@@ -349,7 +349,7 @@ export const insuranceIngestionController = {
       });
 
       // 2. Check for duplicate hash
-      const exists = await documentHashExists(
+      const exists = await (documentHashExists as any)(
         supabase,
         document.document_hash
       );

@@ -24,6 +24,9 @@
   "ai": {
     "binding": "AI"
   },
+  "to_markdown": {
+    "binding": "toMarkdown"
+  },
 
   "vars": {
     "AI_GATEWAY_TOKEN": ""

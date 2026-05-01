@@ -3,6 +3,7 @@ import { psxRouter } from "./psx.router";
 import { mfsRouter } from "./mfs.router";
 import { healthRouter } from "./health.router";
 import { insuranceRouter } from "./insurance.router";
+import { taxDocsRouter } from "./tax-docs.router";
 
 /**
  * Main Router - Registers all route modules
@@ -15,11 +16,13 @@ router.route("/admin/api", healthRouter);
 router.route("/admin/api/psx", psxRouter);
 router.route("/admin/api/mfs", mfsRouter);
 router.route("/admin/api/insurance", insuranceRouter);
+router.route("/admin/api/tax-docs", taxDocsRouter);
 
 // Preview routes (at /admin/api/preview level)
 router.route("/admin/api/preview", healthRouter);
 router.route("/admin/api/preview/psx", psxRouter);
 router.route("/admin/api/preview/mfs", mfsRouter);
 router.route("/admin/api/preview/insurance", insuranceRouter);
+router.route("/admin/api/preview/tax-docs", taxDocsRouter);
 
 export { router };
