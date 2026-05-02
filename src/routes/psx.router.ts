@@ -21,5 +21,6 @@ psxRouter.post("/companies/update/symbol", psxController.updateSymbols);
 // Daily stock ingestion endpoints
 psxRouter.post("/ingest/daily", psxIngestionController.runDailyIngestion);
 psxRouter.post("/ingest/backfill", psxIngestionController.runForDate);
+psxRouter.post("/ingest/backfill/range", psxIngestionController.runForDateRange);
 
 export { psxRouter };
