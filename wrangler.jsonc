@@ -28,9 +28,8 @@
     "binding": "toMarkdown"
   },
 
-  "vars": {
-    "AI_GATEWAY_TOKEN": ""
-  },
+  // AI_GATEWAY_TOKEN is set as a Worker secret via `wrangler secret put`,
+  // not declared here, so the secret binding can claim that name.
 
   // Supabase environment variables (cloud-based)
   // These will be overridden by secrets in production
